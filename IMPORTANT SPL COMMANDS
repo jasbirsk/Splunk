@@ -1,0 +1,115 @@
+Check blocked queues
+index=_internal source=*metrics.log group=queue  name=tcpin_queue OR name=parsing* OR name=*index*| timechart  avg(current_size) by name
+
+
+Check Indexer delay over a thrushold of 10 ms
+index=_introspection host=id* earliest=-24h sourcetype="splunk_resource_usage" data.avg_total_ms>0 component=IOstats 
+| timechart span=1m avg("data.avg_total_ms") by host 
+| eval threshold = 10
+
+Splunk Search for Latest event reported
+|tstats latest(_time) as latest_time by index, sourcetype, host | eval now_time=now() | eval time_since_last=now()-latest_time | where time_since_last>=3600 | foreach *_time [ | eval <<FIELD>>=strftime(<<FIELD>>,"%m/%d/%Y %H:%M:%S") ] | rename latest_time as "Time of Last Event", now_time as "Present Time", time_since_last as "Seconds Since Last Event"
+
+Internal log explorer - dashboard
+
+TCP-IN Cooked status
+index=_internal sourcetype=splunkd group=tcpin_connections (connectionType=cooked OR connectionType=cookedSSL) NOT eventType=*
+| stats count by connectionType
+
+LIST ALL FORWARDERS IN A CSV
+
+index=_internal tcp source="/opt/splunk/var/log/splunk/metrics.log" group=tcpin_connections | dedup hostname | table hostname,splunk_server | outputlookup forwarders.csv
+
+
+
+INDEXING STATUS
+index=_internal source=/opt/splunk/var/log/splunk/health.log due_to_stanza="feature:indexing_ready" 
+| stats count(due_to_stanza) by color
+
+
+SF & RF 
+index=_internal source=/opt/splunk/var/log/splunk/metrics.log group=subtask_counts name=cmmaster_service OR cmmaster_endpoints host=c0m1*.nike.splunkcloud.com | timechart max(to_fix_rep_factor) as RF max(to_fix_search_factor) as SF span=1m
+
+
+| tstats prestats=f count WHERE index=* sourcetype=*  by _time, host span=1mon
+| stats count AS distinct_host_count BY _time
+
+
+| stats sparkline as trend
+
+| tstats prestats=f count WHERE index=* sourcetype=*  by _time, host 
+| stats sparkline as trend count as host_count by host _time
+
+| tstats prestats=f count WHERE index=* sourcetype=*  by _time, host 
+| timechart count(host) as host_count
+| trendline sma5(host_count) as trend| fields * trend
+
+
+HOW MUCH TIME DOES THE SH TAKE TO DELEGATE SEARCH JOBS
+index=_internal uri=*delegatejob*
+| timechart median(spent) as median_spent max(spent) as max_spent
+
+FIND SCHEDULED SEARCH DELAYS
+index=_internal  host=sh*  source="/opt/splunk/var/log/splunk/scheduler.log"  "status=continued" scheduled_time > 0 | eval delay=(_time - scheduled_time) | search delay > 300 | stats max(delay) by savedsearch_name
+
+
+
+
+SEARCH HEAD FLIPPING
+index=_internal source=*splunkd.log sourcetype=splunkd host=c0m1*.nike.splunkcloud.com component=CMPeer peer transitioning NOT bid
+| eval transition = from." -> ".to
+| timechart count by transition
+
+
+GET VERSIONS OF FORWARDERS AND TYPE
+index="_internal" source="*metrics.log*" group=tcpin_connections | dedup hostname| table hostname,sourceIp,fwdType,guid,version,build,os,arch
+
+
+index=_internal source=*splunkd.log* (component=DateParserVerbose) (log_level=WARN OR log_level=ERROR) | rex field=_raw "Context: source(::|=)(?<context_source>[^\|]*?)\|host(::|=)(?<context_host>[^\|]*?)\|(?<context_sourcetype>[^\|]*?)\|" | eval data_source = if(isnull(data_source) AND isnotnull(context_source), context_source, data_source) | eval data_sourcetype = if(isnull(data_sourcetype) AND isnotnull(context_sourcetype), context_sourcetype, data_sourcetype) | eval data_host = if(isnull(data_host) AND isnotnull(context_host), context_host, data_host) | search NOT (data_sourcetype=splunkd OR data_sourcetype=splunkd_* OR data_sourcetype=splunk_* OR data_sourcetype=mongod OR data_sourcetype=kvstore OR data_sourcetype=http_event_collector_metrics) data_sourcetype="us:sfcc:*" context_sourcetype="us:sfcc:customobjects" | stats  count(eval(component=="LineBreakingProcessor" OR component=="DateParserVerbose" OR component=="AggregatorMiningProcessor")) as total_issues  dc(data_source) AS "Source Count"    count(eval(component=="DateParserVerbose")) AS "Timestamp Parsing Issues"  by data_sourcetype  | sort  - total_issues  | rename  data_sourcetype as Sourcetype  total_issues as "Total Issues"
+
+
+
+SEARCH TO LIST CONTINUED/SUCCESS SEARCHES OR DATAMODELS
+index="_internal" sourcetype="scheduler" 
+            | eval scheduled=strftime(scheduled_time, "%Y-%m-%d %H:%M:%S") 
+            | stats values(scheduled) as scheduled
+                    values(savedsearch_name) as search_name
+                    values(status) as status
+                    values(reason) as reason
+                    values(run_time) as run_time 
+                    values(dm_node) as dm_node
+                    values(sid) as sid
+                    by _time,savedsearch_name |  sort -scheduled
+            | table scheduled, search_name, status, reason, run_time
+			
+			
+LIST ALL SEARCHES RUN BY A USER ( ADHOC)
+			index=_audit action=search info=granted search=* NOT "search_id='scheduler" NOT "search='|history" NOT "user=splunk-system-user" NOT "search='typeahead" NOT "search='| metadata type=sourcetypes | search totalCount > 0"
+ | stats count by _time user search savedsearch_name  
+ | where savedsearch_name=""
+ | fields - savedsearch_name
+| search user=*jkalr*
+
+LIST ALL FORWARDERS ON THE NETWORK
+
+index=_internal source=*metrics.log* group=tcpin_connections os=* uf  | eval os=os." ".arch | eval version=version." (".build.")" | stats latest(fwdType) AS forwarder_type latest(os) AS os latest(version) AS version by hostname | rename hostname as splunk_forwarder | replace uf with "Universal", full with "Full" in forwarder_type | rename splunk_forwarder as "Splunk Forwarder", forwarder_type as "Forwarder Type", os as "Operating System", version as Version
+
+
+SEATCH RECOMMENDED EVENT TRUNCATE SIZE FOR EVENTS FROM A SOURCETYPE
+index="_internal" sourcetype=splunkd source="*splunkd.log" log_level="WARN" "Truncating" 
+| rex "line length >= (?<line_length>\d+)" 
+| stats values(host) as host values(data_host) as data_host count last(_raw) as common_events last(_time) as _time max(line_length) as max_line_length by data_sourcetype log_level 
+| table _time host data_host data_sourcetype log_level max_line_length count common_events 
+| rename data_sourcetype as sourcetype 
+| eval number=max_line_length 
+| eval recommeneded_truncate=max_line_length+100000 
+| eval recommeneded_truncate=recommeneded_truncate-(recommeneded_truncate%100000) 
+| eval recommended_config="# props.conf
+ ["+sourcetype+"]
+ TRUNCATE = "+recommeneded_truncate 
+| table _time host data_host sourcetype log_level max_line_length recommeneded_truncate recommended_config count common_events 
+| sort -count
+| search sourcetype="aws:firehose:json"
+
+SEARCH TO GET BIGGEST EVENT SIZE FROM  SOURCETYPE
+index=lambda sourcetype="aws:firehose:json" source="http:lambda_json" | eval length=len(_raw) | stats max(length) AS biggest_event_size
